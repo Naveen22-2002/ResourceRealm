@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const mysql = require('mysql2');
+const mongoose = require('mongoose');
 const fs = require('fs');
 const app = express();
 
@@ -18,224 +18,170 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
+// Connect to the MongoDB database
+mongoose.connect('mongodb+srv://naveenede:Naveen4@cluster0.ttnijab.mongodb.net/resourcerealm', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+
+// Define a schema for your documents
+const materialSchema = new mongoose.Schema({
+  file_data: Buffer,
+  title: String,
+  subject: String,
+  file_type: String,
+});
+
+// Create a model for the schema
+const Material = mongoose.model('Material', materialSchema);
+
 // Serve the index.html file
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/index.html');
 });
 
 // Handle the file upload
-app.post('/upload', upload.single('pdf_file'), (req, res) => {
-  // Read the uploaded file
-  const pdfData = fs.readFileSync(req.file.path);
-  const title = req.body.title;
-  const subject = req.body.subject;
-  const fileType = req.file.mimetype;
+app.post('/upload', upload.single('pdf_file'), async (req, res) => {
+  try {
+    const pdfData = fs.readFileSync(req.file.path);
+    const title = req.body.title;
+    const subject = req.body.subject;
+    const fileType = req.file.mimetype;
 
-  // Connect to the MySQL database
-  const connection = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'Ganesh@7081',
-    database: 'studymaterial'
-  });
+    // Create a new Material document and save it to the MongoDB
+    const material = new Material({
+      file_data: pdfData,
+      title: title,
+      subject: subject,
+      file_type: fileType,
+    });
 
-  connection.connect((err) => {
-    if (err) {
-      console.error('Error connecting to MySQL database:', err);
-      res.status(500).send('Internal Server Error');
+    await material.save();
+
+    console.log('File inserted successfully');
+    
+    // Get all files under the same subject
+    const files = await Material.find({ subject: subject });
+
+    // Send the response HTML with the uploaded files under the subject
+    let responseHtml = `
+      <h3>File uploaded and stored in the database</h3>
+      <h4>Files under the subject '${subject}'</h4>
+    `;
+
+    if (files.length > 0) {
+      const fileList = files.map(file => `
+        <li>
+          ${file.title} - 
+          <a href="/display/${file._id}">View</a> |
+          <a href="/download/${file._id}">Download</a>
+        </li>
+      `).join('');
+      responseHtml += `<ul>${fileList}</ul>`;
     } else {
-      // Create the table if it doesn't exist
-      const createTableQuery = 'CREATE TABLE IF NOT EXISTS material (id INT AUTO_INCREMENT PRIMARY KEY, file_data LONGBLOB, title VARCHAR(255), subject VARCHAR(255), file_type VARCHAR(50))';
-      connection.query(createTableQuery, (err) => {
-        if (err) {
-          console.error('Error creating table:', err);
-          res.status(500).send('Internal Server Error');
-        } else {
-          // Insert the file into the database
-          const insertQuery = 'INSERT INTO material (file_data, title, subject, file_type) VALUES (?, ?, ?, ?)';
-          connection.query(insertQuery, [pdfData, title, subject, fileType], (err) => {
-            if (err) {
-              console.error('Error inserting file:', err);
-              res.status(500).send('Internal Server Error');
-            } else {
-              console.log('File inserted successfully');
-              // Get all files under the same subject
-              const filesBySubjectQuery = 'SELECT * FROM material WHERE subject = ?';
-              connection.query(filesBySubjectQuery, [subject], (err, files) => {
-                if (err) {
-                  console.error('Error retrieving files by subject:', err);
-                  res.status(500).send('Internal Server Error');
-                } else {
-                  // Send the response HTML with the uploaded files under the subject
-                  let responseHtml = `
-                    <h3>File uploaded and stored in the database</h3>
-                    <h4>Files under the subject '${subject}'</h4>
-                  `;
-
-                  if (files.length > 0) {
-                    const fileList = files.map(file => `
-                      <li>
-                        ${file.title} - 
-                        <a href="/display/${file.id}">View</a> |
-                        <a href="/download/${file.id}">Download</a>
-                      </li>
-                    `).join('');
-                    responseHtml += `<ul>${fileList}</ul>`;
-                  } else {
-                    responseHtml += `<p>No files found under the subject '${subject}'</p>`;
-                  }
-
-                  res.send(responseHtml);
-                }
-              });
-            }
-          });
-        }
-      });
+      responseHtml += `<p>No files found under the subject '${subject}'</p>`;
     }
-  });
+
+    res.send(responseHtml);
+  } catch (err) {
+    console.error('Error uploading and storing file:', err);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Handle the search form submission and file retrieval
-app.get('/search', (req, res) => {
+app.get('/search', async (req, res) => {
   const keyword = req.query.keyword;
 
-  // Connect to the MySQL database
-  const connection = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'Ganesh@7081',
-    database: 'studymaterial'
-  });
+  try {
+    // Perform the search query
+    const keywordPattern = new RegExp(keyword, 'i');
+    const results = await Material.find({ $or: [{ title: keywordPattern }, { subject: keywordPattern }] });
 
-  connection.connect((err) => {
-    if (err) {
-      console.error('Error connecting to MySQL database:', err);
-      res.status(500).send('Internal Server Error');
-    } else {
-      // Perform the search query
-      const searchQuery = 'SELECT * FROM material WHERE title LIKE ? OR subject LIKE ?';
-      const keywordPattern = `%${keyword}%`;
-      connection.query(searchQuery, [keywordPattern, keywordPattern], (err, results) => {
-        if (err) {
-          console.error('Error searching for files:', err);
-          res.status(500).send('Internal Server Error');
-        } else {
-          if (results.length > 0) {
-            // Files found in the database
-            let responseHtml = `
-              <h3>Files Found</h3>
-              <ul>
-            `;
-            results.forEach((file) => {
-              responseHtml += `
-                <li>
-                  ${file.title} - 
-                  <a href="/display/${file.id}">View</a> |
-                  <a href="/download/${file.id}">Download</a>
-                </li>
-              `;
-            });
-            responseHtml += '</ul>';
-            res.send(responseHtml);
-          } else {
-            // No files found in the database
-            res.send('<p>No files found</p>');
-          }
-        }
+    if (results.length > 0) {
+      // Files found in the database
+      let responseHtml = `
+        <h3>Files Found</h3>
+        <ul>
+      `;
+      results.forEach((file) => {
+        responseHtml += `
+          <li>
+            ${file.title} - 
+            <a href="/display/${file._id}">View</a> |
+            <a href="/download/${file._id}">Download</a>
+          </li>
+        `;
       });
+      responseHtml += '</ul>';
+      res.send(responseHtml);
+    } else {
+      // No files found in the database
+      res.send('<p>No files found</p>');
     }
-  });
+  } catch (err) {
+    console.error('Error searching for files:', err);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Create a new connection for file downloading
-app.get('/download/:id', (req, res) => {
+app.get('/download/:id', async (req, res) => {
   const fileId = req.params.id;
 
-  // Connect to the MySQL database
-  const connection = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'Ganesh@7081',
-    database: 'studymaterial'
-  });
+  try {
+    // Retrieve the file from MongoDB by ID
+    const file = await Material.findById(fileId);
 
-  connection.connect((err) => {
-    if (err) {
-      console.error('Error connecting to MySQL database:', err);
-      res.status(500).send('Internal Server Error');
+    if (file) {
+      // File found in the database
+      const fileData = file.file_data;
+      const fileName = file.title;
+      const fileType = file.file_type;
+
+      // Set the response headers for file download
+      res.setHeader('Content-Type', fileType);
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      // Send the file data as the response
+      res.send(fileData);
     } else {
-      // Perform the query to retrieve the file by ID and send it as a response
-      const downloadQuery = 'SELECT * FROM material WHERE id = ?';
-      connection.query(downloadQuery, [fileId], (err, results) => {
-        if (err) {
-          console.error('Error retrieving file by ID:', err);
-          res.status(500).send('Internal Server Error');
-        } else {
-          if (results.length > 0) {
-            // File found in the database
-            const fileData = results[0].file_data;
-            const fileName = results[0].title;
-            const fileType = results[0].file_type;
-
-            // Set the response headers for file download
-            res.setHeader('Content-Type', fileType);
-            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-            // Send the file data as the response
-            res.send(fileData);
-          } else {
-            // File not found in the database
-            res.status(404).send('File not found');
-          }
-        }
-      });
+      // File not found in the database
+      res.status(404).send('File not found');
     }
-  });
+  } catch (err) {
+    console.error('Error retrieving file by ID:', err);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Create a new connection for file display
-app.get('/display/:id', (req, res) => {
+app.get('/display/:id', async (req, res) => {
   const fileId = req.params.id;
 
-  // Connect to the MySQL database
-  const connection = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'Ganesh@7081',
-    database: 'studymaterial'
-  });
+  try {
+    // Retrieve the file from MongoDB by ID
+    const file = await Material.findById(fileId);
 
-  connection.connect((err) => {
-    if (err) {
-      console.error('Error connecting to MySQL database:', err);
-      res.status(500).send('Internal Server Error');
+    if (file) {
+      // File found in the database
+      const fileData = file.file_data;
+      const fileName = file.title;
+      const fileType = file.file_type;
+
+      // Set the response headers for file display
+      res.setHeader('Content-Type', fileType);
+      res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+      // Send the file data as the response
+      res.send(fileData);
     } else {
-      // Perform the query to retrieve the file by ID and send it as a response
-      const displayQuery = 'SELECT * FROM material WHERE id = ?';
-      connection.query(displayQuery, [fileId], (err, results) => {
-        if (err) {
-          console.error('Error retrieving file by ID:', err);
-          res.status(500).send('Internal Server Error');
-        } else {
-          if (results.length > 0) {
-            // File found in the database
-            const fileData = results[0].file_data;
-            const fileName = results[0].title;
-            const fileType = results[0].file_type;
-
-            // Set the response headers for file display
-            res.setHeader('Content-Type', fileType);
-            res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
-            // Send the file data as the response
-            res.send(fileData);
-          } else {
-            // File not found in the database
-            res.status(404).send('File not found');
-          }
-        }
-      });
+      // File not found in the database
+      res.status(404).send('File not found');
     }
-  });
+  } catch (err) {
+    console.error('Error retrieving file by ID:', err);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Start the server
